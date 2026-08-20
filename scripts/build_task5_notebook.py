@@ -47,12 +47,15 @@ def main() -> None:
 
             Carry the Task 4 Search → Critique → Refine workflow into a
             deployment-safe Google ADK application, deploy it to Vertex AI Agent
-            Engine, and preserve a successful remote query for grading.
+            Engine, and add a bounded Creativity → Refine loop that improves the
+            writing while keeping Refine as the final author.
 
             ## Checklist
 
             - [x] Copy the completed Task 4 notebook as the starting point.
             - [x] Recreate its Greeter, Search, Critique, and Refine workflow.
+            - [x] Add a Creativity → Refine loop capped at three cycles.
+            - [x] Keep Refine as the final author and factuality gate.
             - [x] Test the deployable application locally with a fresh ADK session.
             - [x] Initialize the current Vertex AI Agent Engine client.
             - [x] Deploy with explicit, pinned runtime requirements.
@@ -73,7 +76,8 @@ def main() -> None:
 
             This notebook is programmatically copied forward from
             `04_agent_workflow.ipynb`. The deployed agent keeps Task 4's verified
-            answer architecture. Notebook-only callback lists and the local
+            answer architecture, extended with a bounded Creativity → Refine loop.
+            Notebook-only callback lists and the local
             `Runner` are omitted from the deployment object so its serialized
             package contains only the ADK agents and built-in Google Search tool.
 
@@ -143,7 +147,7 @@ def main() -> None:
 
             import google.auth
             import vertexai
-            from google.adk.agents import Agent, SequentialAgent
+            from google.adk.agents import Agent, LoopAgent, SequentialAgent
             from google.adk.tools import google_search
             from vertexai import agent_engines
 
@@ -203,10 +207,13 @@ def main() -> None:
             ## 3. Deployment-safe Task 4 workflow
 
             The deployable root agent retains Task 4's Greeter and deterministic
-            `SequentialAgent`. Search and Critique independently use ADK's built-in
-            Google Search tool; `output_key` values pass the draft and critique to
-            the next stage. The date is embedded at construction time so no hidden
-            notebook state is required in the managed runtime.
+            outer `SequentialAgent`. Search and Critique independently use ADK's
+            built-in Google Search tool, then a Verified Draft stage creates the
+            factual baseline. An inner `LoopAgent` runs Creativity followed by
+            Refine for at most three cycles. Refine writes the durable answer on
+            every cycle, so it is both the factuality gate and final author. The
+            date is embedded at construction time so no hidden notebook state is
+            required in the managed runtime.
             """
         ),
         code(
@@ -246,12 +253,13 @@ def main() -> None:
                 output_key="critique",
             )
 
-            refine_agent = Agent(
-                name="refine_agent",
+            verified_draft_agent = Agent(
+                name="verified_draft_agent",
                 model=MODEL,
-                description="Apply the critique and return the polished answer.",
+                description="Consolidate the draft and critique into a factual baseline.",
                 instruction="""
-                Rewrite the draft into the final user-facing answer.
+                Consolidate the searched draft and independent critique into a
+                verified factual baseline.
 
                 --- INITIAL ANSWER ---
                 {initial_answer}
@@ -260,16 +268,89 @@ def main() -> None:
                 {critique}
                 --- END CRITIQUE ---
 
-                Apply valid corrections, preserve supported details, and attribute
-                sources by organization name. Return only the polished answer.
+                Apply valid corrections, preserve dates, qualifiers, and source
+                attributions, and remove unsupported claims. Do not add stylistic
+                flourish. Return only the verified baseline.
                 """,
                 output_key="refined_answer",
             )
 
+            creativity_agent = Agent(
+                name="creativity_agent",
+                model=MODEL,
+                description=(
+                    "Propose vivid, engaging language without changing verified facts."
+                ),
+                instruction="""
+                Rewrite the current verified answer below as a creative candidate.
+
+                --- CURRENT VERIFIED ANSWER ---
+                {refined_answer}
+                --- END CURRENT VERIFIED ANSWER ---
+
+                Improve the opening, sentence rhythm, transitions, clarity, and
+                memorability. Preserve every fact, date, qualifier, correction,
+                and source attribution. Do not add claims, exaggerate, invent
+                quotations, introduce unsupported metaphors, or mention the
+                workflow. Return only the creative candidate.
+                """,
+                output_key="creative_candidate",
+            )
+
+            refine_agent = Agent(
+                name="refine_agent",
+                model=MODEL,
+                description=(
+                    "Fact-check the creative candidate and author the final answer."
+                ),
+                instruction="""
+                Author the final audience-ready answer by comparing the creative
+                candidate with the verified evidence and current factual baseline.
+
+                --- INITIAL ANSWER ---
+                {initial_answer}
+                --- END INITIAL ANSWER ---
+                --- CRITIQUE ---
+                {critique}
+                --- END CRITIQUE ---
+                --- CURRENT VERIFIED ANSWER ---
+                {refined_answer}
+                --- END CURRENT VERIFIED ANSWER ---
+                --- CREATIVE CANDIDATE ---
+                {creative_candidate}
+                --- END CREATIVE CANDIDATE ---
+
+                Keep engaging language only where it is factually faithful.
+                Restore any fact, date, qualifier, correction, or attribution that
+                the candidate changed or omitted. Do not add unsupported claims.
+                Return only the final answer; this output becomes the verified
+                baseline for the next loop cycle.
+                """,
+                output_key="refined_answer",
+            )
+
+            creative_refinement_loop = LoopAgent(
+                name="creative_refinement_loop",
+                description=(
+                    "Iterate Creativity then Refine, with Refine always authoring "
+                    "the durable answer."
+                ),
+                max_iterations=3,
+                sub_agents=[creativity_agent, refine_agent],
+            )
+
             answer_team = SequentialAgent(
                 name="answer_team",
-                description="Search, Critique, and Refine in a fixed order.",
-                sub_agents=[search_agent, critique_agent, refine_agent],
+                description=(
+                    "Search, Critique, seed a verified draft, then iterate creative "
+                    "refinement up to three times."
+                ),
+                sub_agents=[
+                    search_agent,
+                    critique_agent,
+                    verified_draft_agent,
+                    creative_refinement_loop,
+                ],
             )
 
             greeter_agent = Agent(
@@ -289,12 +370,19 @@ def main() -> None:
                 "root_agent": greeter_agent.name,
                 "workflow_type": type(answer_team).__name__,
                 "workflow_order": [agent.name for agent in answer_team.sub_agents],
+                "loop_type": type(creative_refinement_loop).__name__,
+                "loop_order": [
+                    agent.name for agent in creative_refinement_loop.sub_agents
+                ],
+                "loop_max_iterations": creative_refinement_loop.max_iterations,
                 "search_tool": "google_search",
                 "critique_tool": "google_search",
                 "state_handoffs": {
                     "draft": search_agent.output_key,
                     "critique": critique_agent.output_key,
-                    "final": refine_agent.output_key,
+                    "verified_seed": verified_draft_agent.output_key,
+                    "creative_candidate": creativity_agent.output_key,
+                    "final_refinement": refine_agent.output_key,
                 },
             }
             print(json.dumps(architecture_evidence, indent=2))
@@ -340,17 +428,27 @@ def main() -> None:
                         if event.get("author")
                     )
                 )
-                final_text = next(
+                final_event = next(
                     (
-                        text
-                        for text in reversed([event_text(event) for event in events])
-                        if text
+                        event
+                        for event in reversed(events)
+                        if event_text(event)
                     ),
-                    "",
+                    {},
                 )
+                final_text = event_text(final_event)
                 return {
                     "event_count": len(events),
                     "authors": authors,
+                    "author_counts": {
+                        author: sum(
+                            1
+                            for event in events
+                            if str(event.get("author", "")) == author
+                        )
+                        for author in authors
+                    },
+                    "final_author": final_event.get("author", ""),
                     "final_response": final_text[:2400],
                 }
 
@@ -376,9 +474,13 @@ def main() -> None:
 
             local_result = summarize_events(local_events)
             assert local_result["final_response"], local_result
-            assert {"greeter", "search_agent", "critique_agent", "refine_agent"} <= set(
-                local_result["authors"]
-            ), local_result
+            assert {
+                "greeter", "search_agent", "critique_agent",
+                "verified_draft_agent", "creativity_agent", "refine_agent",
+            } <= set(local_result["authors"]), local_result
+            assert local_result["author_counts"]["creativity_agent"] == 3, local_result
+            assert local_result["author_counts"]["refine_agent"] == 3, local_result
+            assert local_result["final_author"] == "refine_agent", local_result
             print(json.dumps({"session_id": local_session["id"], **local_result}, indent=2))
 
             rejected_cases = []
@@ -462,20 +564,26 @@ def main() -> None:
             """
             ## 6. Deploy to Vertex AI Agent Engine
 
-            This is the live managed-resource creation step. Its output must contain
+            This live step updates the previously graded Agent Engine in place. Its
+            output must contain
             the fully qualified Agent Engine resource name used by later cells and
             by the grader.
             """
         ),
         code(
             """
-            DISPLAY_NAME = "task5-verified-answer-agent"
-            remote_agent = agent_engines.create(
-                adk_app,
+            DISPLAY_NAME = "task5-creative-verified-answer-agent"
+            EXISTING_RESOURCE_NAME = (
+                "projects/571054353266/locations/us-central1/"
+                "reasoningEngines/4093976020686733312"
+            )
+            remote_agent = agent_engines.update(
+                EXISTING_RESOURCE_NAME,
+                agent_engine=adk_app,
                 requirements=DEPLOYMENT_REQUIREMENTS,
                 display_name=DISPLAY_NAME,
                 description=(
-                    "Task 5 ADK Search-Critique-Refine workflow deployed for grading."
+                    "Task 5 Search-Critique plus bounded Creativity-Refine loop."
                 ),
             )
 
@@ -485,7 +593,7 @@ def main() -> None:
             print(
                 json.dumps(
                     {
-                        "deployment_status": "created",
+                        "deployment_status": "updated",
                         "display_name": DISPLAY_NAME,
                         "resource_name": RESOURCE_NAME,
                     },
@@ -500,7 +608,9 @@ def main() -> None:
 
             The query below is sent to the deployed Agent Engine, not the local
             object. A new managed session is created first, and the saved response
-            must include all four Task 4 authors and a nonempty refined answer.
+            must include the search, critique, verified-draft, Creativity, and
+            Refine authors. Creativity and Refine must each run three times, with
+            Refine producing the nonempty final answer.
             """
         ),
         code(
@@ -525,9 +635,13 @@ def main() -> None:
             remote_result = summarize_events(remote_events)
             remote_response = remote_result["final_response"]
             assert remote_response, remote_result
-            assert {"greeter", "search_agent", "critique_agent", "refine_agent"} <= set(
-                remote_result["authors"]
-            ), remote_result
+            assert {
+                "greeter", "search_agent", "critique_agent",
+                "verified_draft_agent", "creativity_agent", "refine_agent",
+            } <= set(remote_result["authors"]), remote_result
+            assert remote_result["author_counts"]["creativity_agent"] == 3, remote_result
+            assert remote_result["author_counts"]["refine_agent"] == 3, remote_result
+            assert remote_result["final_author"] == "refine_agent", remote_result
             assert "1970" in remote_response, remote_result
             print(
                 json.dumps(
@@ -588,9 +702,38 @@ def main() -> None:
                     == "04_agent_workflow.ipynb"
                 ),
                 "google_adk_agent_created": greeter_agent.name == "greeter",
-                "task4_workflow_preserved": architecture_evidence["workflow_order"]
-                == ["search_agent", "critique_agent", "refine_agent"],
+                "task4_workflow_extended_with_bounded_loop": architecture_evidence[
+                    "workflow_order"
+                ] == [
+                    "search_agent", "critique_agent", "verified_draft_agent",
+                    "creative_refinement_loop",
+                ],
+                "verified_draft_agent_created": (
+                    verified_draft_agent.name == "verified_draft_agent"
+                    and verified_draft_agent.output_key == "refined_answer"
+                ),
+                "creativity_agent_created": (
+                    creativity_agent.name == "creativity_agent"
+                    and creativity_agent.output_key == "creative_candidate"
+                ),
+                "loop_agent_created": (
+                    architecture_evidence["loop_type"] == "LoopAgent"
+                ),
+                "loop_max_three_cycles": (
+                    architecture_evidence["loop_max_iterations"] == 3
+                ),
+                "loop_order_creativity_then_refine": (
+                    architecture_evidence["loop_order"]
+                    == ["creativity_agent", "refine_agent"]
+                ),
                 "local_adk_app_test_passed": bool(local_result["final_response"]),
+                "local_loop_ran_three_cycles": (
+                    local_result["author_counts"]["creativity_agent"] == 3
+                    and local_result["author_counts"]["refine_agent"] == 3
+                ),
+                "local_final_answer_is_refine_output": (
+                    local_result["final_author"] == "refine_agent"
+                ),
                 "agent_engine_client_initialized": deployment_preflight[
                     "agent_engine_client_initialized"
                 ],
@@ -602,9 +745,17 @@ def main() -> None:
                 "deployed_resource_name_saved": RESOURCE_NAME.startswith("projects/"),
                 "remote_query_successful": bool(remote_response),
                 "remote_workflow_authors_visible": {
-                    "greeter", "search_agent", "critique_agent", "refine_agent"
+                    "greeter", "search_agent", "critique_agent",
+                    "verified_draft_agent", "creativity_agent", "refine_agent",
                 }
                 <= set(remote_result["authors"]),
+                "remote_loop_ran_three_cycles": (
+                    remote_result["author_counts"]["creativity_agent"] == 3
+                    and remote_result["author_counts"]["refine_agent"] == 3
+                ),
+                "remote_final_answer_is_refine_output": (
+                    remote_result["final_author"] == "refine_agent"
+                ),
                 "misleading_remote_premise_corrected": "1970" in remote_response,
                 "invalid_input_stopped_before_model": all(
                     not item["accepted"] and not item["model_called"]
@@ -616,7 +767,10 @@ def main() -> None:
 
             assert all(grading_evidence.values()), grading_evidence
             print(json.dumps(grading_evidence, indent=2))
-            print("TASK 5 COMPLETE: Agent Engine deployment and remote query passed.")
+            print(
+                "TASK 5 COMPLETE: bounded Creativity-Refine loop update and "
+                "remote query passed."
+            )
             """
         ),
         markdown(
@@ -626,6 +780,7 @@ def main() -> None:
             - [Deploy an agent to Vertex AI Agent Engine](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/deploy)
             - [Vertex AI Agent Engine setup](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/set-up)
             - [Vertex AI Python `agent_engines` reference](https://docs.cloud.google.com/python/docs/reference/vertexai/latest/vertexai.agent_engines)
+            - [Google ADK loop agents](https://adk.dev/agents/workflow-agents/loop-agents/)
             - [Google ADK sequential agents](https://adk.dev/agents/workflow-agents/sequential-agents/)
             """
         ),
