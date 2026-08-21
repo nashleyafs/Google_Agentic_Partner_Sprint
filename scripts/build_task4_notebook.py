@@ -70,7 +70,7 @@ def main() -> None:
 
             - **Project:** `qwiklabs-gcp-02-66b2cfb8579b`
             - **Region:** `us-central1`
-            - **Model:** `gemini-2.5-flash`
+            - **Model:** `gemini-3.7-flash` (`global` endpoint)
             """
         ),
         markdown(

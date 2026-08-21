@@ -67,7 +67,7 @@ def main() -> None:
 
             - **Project:** `qwiklabs-gcp-02-66b2cfb8579b`
             - **Region:** `us-central1`
-            - **Model:** `gemini-2.5-flash`
+            - **Model:** `gemini-3.7-flash` (`global` endpoint)
             """
         ),
         markdown(
@@ -154,7 +154,8 @@ def main() -> None:
 
             EXPECTED_PROJECT = "qwiklabs-gcp-02-66b2cfb8579b"
             LOCATION = "us-central1"
-            MODEL = "gemini-2.5-flash"
+            MODEL_LOCATION = "global"
+            MODEL = "gemini-3.7-flash"
             CURRENT_DATE_UTC = datetime.now(timezone.utc).date().isoformat()
 
 
@@ -183,6 +184,7 @@ def main() -> None:
                 "gcloud_project": detected_project,
                 "adc_project": adc_project,
                 "location": LOCATION,
+                "model_location": MODEL_LOCATION,
                 "model": MODEL,
                 "google_cloud_aiplatform_version": importlib.metadata.version(
                     "google-cloud-aiplatform"
@@ -198,7 +200,7 @@ def main() -> None:
                 )
 
             os.environ["GOOGLE_CLOUD_PROJECT"] = EXPECTED_PROJECT
-            os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
+            os.environ["GOOGLE_CLOUD_LOCATION"] = MODEL_LOCATION
             os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
             '''
         ),
